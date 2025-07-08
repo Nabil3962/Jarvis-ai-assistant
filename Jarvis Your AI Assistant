@@ -1,0 +1,318 @@
+import speech_recognition as sr
+import requests
+import os
+import webbrowser
+import pyautogui
+import threading
+import tkinter as tk
+from tkinter import scrolledtext
+from translatepy import Translator
+from gtts import gTTS
+from playsound import playsound
+import difflib
+import uuid
+import re
+from requests.adapters import HTTPAdapter, Retry
+
+# ==== YOUR API KEYS ====
+OPENROUTER_API_KEY = "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"
+OPENWEATHER_API_KEY = "98fcd8e78df48607c349e6568cd10946"
+
+# === Configuration ===
+MODEL = "openai/gpt-4o-mini"
+DEFAULT_CITY = "Dhaka"
+translator = Translator()
+recognizer = sr.Recognizer()
+listening = False
+fullscreen = True
+
+# === GUI Setup ===
+root = tk.Tk()
+root.title("🤖 Jarvis Your AI Assistant")
+root.geometry("850x750")
+root.configure(bg="#0f0f1e")
+root.resizable(True, True)
+root.attributes('-fullscreen', fullscreen)
+root.minsize(550, 650)
+
+# Fonts and colors
+FONT_TITLE = ("Orbitron", 22, "bold")
+FONT_CHAT = ("Consolas", 12)
+FONT_INPUT = ("Consolas", 16)
+BG_COLOR = "#0f0f1e"
+TEXT_BG = "#121224"
+TEXT_FG = "#00fff7"
+USER_COLOR = "#ff00d4"
+BOT_COLOR = "#00fff7"
+ACCENT_COLOR = "#ff00d4"
+BUTTON_BG = "#1a1a33"
+BUTTON_FG = "#00fff7"
+ENTRY_BG = "#121224"
+ENTRY_FG = "#00fff7"
+
+# === Container Frame with pack for dynamic resizing ===
+container = tk.Frame(root, bg=BG_COLOR)
+container.pack(expand=True, fill='both', padx=10, pady=10)
+
+# Title Label
+title_label = tk.Label(container, text="Jarvis – Your AI Assistant", font=FONT_TITLE,
+                       bg=BG_COLOR, fg=ACCENT_COLOR)
+title_label.pack(pady=(0, 20))
+
+# Chat History Box
+chat_box = scrolledtext.ScrolledText(container, wrap=tk.WORD, state="disabled",
+                                     bg=TEXT_BG, fg=TEXT_FG, font=FONT_CHAT,
+                                     padx=10, pady=10, width=80, height=28)
+chat_box.pack(pady=(0, 15), fill='both', expand=True)
+
+# Status Label
+status_var = tk.StringVar(value="Status: Waiting for wake word...")
+status_label = tk.Label(container, textvariable=status_var, font=("Orbitron", 12, "italic"),
+                        fg=ACCENT_COLOR, bg=BG_COLOR)
+status_label.pack(pady=(0, 10))
+
+# Input Frame (Input + Buttons)
+input_frame = tk.Frame(container, bg=BG_COLOR)
+input_frame.pack(fill='x')
+
+input_var = tk.StringVar()
+input_entry = tk.Entry(input_frame, textvariable=input_var, font=FONT_INPUT,
+                       bg=ENTRY_BG, fg=ENTRY_FG, insertbackground=ENTRY_FG,
+                       relief=tk.FLAT)
+input_entry.pack(side="left", padx=(0, 10), ipady=10, fill='x', expand=True)
+
+send_button = tk.Button(input_frame, text="Send", command=lambda: on_enter_key(),
+                        bg=BUTTON_BG, fg=BUTTON_FG, font=FONT_INPUT, width=10)
+send_button.pack(side="left")
+
+# Voice listen button below input frame
+btn_voice = tk.Button(container, text="🎤 Start Listening", command=lambda: toggle_listen(),
+                      bg=BUTTON_BG, fg=BUTTON_FG, font=FONT_INPUT)
+btn_voice.pack(pady=(20, 0), fill='x')
+
+# === Fullscreen toggle with ESC key ===
+def toggle_fullscreen(event=None):
+    global fullscreen
+    fullscreen = not fullscreen
+    root.attributes('-fullscreen', fullscreen)
+
+    if not fullscreen:
+        width, height = 550, 650  # smaller window size
+        root.geometry(f"{width}x{height}")
+        root.minsize(width, height)
+        root.update_idletasks()
+        screen_width = root.winfo_screenwidth()
+        screen_height = root.winfo_screenheight()
+        x = (screen_width // 2) - (width // 2)
+        y = (screen_height // 2) - (height // 2)
+        root.geometry(f"{width}x{height}+{x}+{y}")
+        chat_box.config(width=65, height=20)
+    else:
+        root.minsize(100, 100)
+        chat_box.config(width=80, height=28)
+
+root.bind("<Escape>", toggle_fullscreen)
+
+# === Functions ===
+
+def append_chat(sender, message, color):
+    chat_box.config(state="normal")
+    chat_box.insert(tk.END, f"{sender}: ", ("sender",))
+    chat_box.insert(tk.END, f"{message}\n", ("msg",))
+    chat_box.tag_config("sender", foreground=color, font=("Orbitron", 11, "bold"))
+    chat_box.tag_config("msg", foreground=TEXT_FG, font=FONT_CHAT)
+    chat_box.config(state="disabled")
+    chat_box.yview(tk.END)
+
+def speak(text):
+    try:
+        tts = gTTS(text=text, lang='en')
+        filename = f"voice_{uuid.uuid4()}.mp3"
+        tts.save(filename)
+        playsound(filename)
+        os.remove(filename)
+    except Exception as e:
+        print("TTS error:", e)
+
+def translate_to_english(text):
+    try:
+        return translator.translate(text, "en").result
+    except:
+        return text
+
+def similar(a, b):
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+def toggle_listen():
+    global listening
+    if listening:
+        listening = False
+        speak("Stopping voice recognition.")
+        status_var.set("Status: Voice recognition stopped.")
+        btn_voice.config(text="🎤 Start Listening")
+    else:
+        listening = True
+        threading.Thread(target=voice_command_loop, daemon=True).start()
+        status_var.set("Status: Listening for 'Hey Jarvis'...")
+        btn_voice.config(text="🛑 Stop Listening")
+
+def wait_for_wake_word():
+    global listening
+    with sr.Microphone() as source:
+        recognizer.adjust_for_ambient_noise(source, duration=1)
+        while listening:
+            try:
+                audio = recognizer.listen(source, timeout=5, phrase_time_limit=5)
+                query = recognizer.recognize_google(audio).lower()
+                print("🔊 Heard:", query)
+                if similar(query, "hey jarvis") > 0.7:
+                    speak("Yes, I am listening.")
+                    status_var.set("Status: Listening for command...")
+                    root.update()
+                    command = listen_any_language()
+                    if command:
+                        append_chat("You", command, USER_COLOR)
+                        root.update()  # Update UI immediately
+
+                        if "exit" in command or "stop" in command:
+                            speak("Goodbye.")
+                            listening = False
+                            status_var.set("Status: Voice recognition stopped.")
+                            break
+
+                        response = process_command_and_respond(command)
+                        if response:
+                            append_chat("Jarvis", response, BOT_COLOR)
+                            root.update()
+                            speak(response)
+                    status_var.set("Status: Waiting for 'Hey Jarvis'...")
+                    root.update()
+            except Exception as e:
+                print("Wake word error:", e)
+                continue
+
+def voice_command_loop():
+    wait_for_wake_word()
+
+def listen_any_language():
+    with sr.Microphone() as source:
+        recognizer.adjust_for_ambient_noise(source, duration=0.5)
+        status_var.set("🎤 Listening for command...")
+        root.update()
+        try:
+            audio = recognizer.listen(source, timeout=7, phrase_time_limit=10)
+            query = recognizer.recognize_google(audio)
+            print("🗣️ You said:", query)
+            return translate_to_english(query)
+        except Exception as e:
+            print("Recognition error:", e)
+            speak("Sorry, I couldn't understand.")
+            return ""
+
+def process_command_and_respond(command):
+    if not command:
+        return "I didn't catch that."
+
+    # === Custom Creator Answer ===
+    creation_keywords = ["who made", "who created", "who build", "who built", "who develop", "your creator", "who programmed", "how were you created", "who designed"]
+    if any(keyword in command.lower() for keyword in creation_keywords):
+        return "I was created by Suhail Al Mehedi on 8th July 2025."
+
+    # === Weather ===
+    weather_keywords = ["weather", "temperature", "climate", "rain", "hot", "cold"]
+    if any(word in command.lower() for word in weather_keywords):
+        city_match = re.search(r"weather in ([a-zA-Z\s]+)", command.lower())
+        city = DEFAULT_CITY
+        if city_match:
+            city = city_match.group(1).strip()
+        return get_weather(city)
+
+    if perform_command(command):
+        return ""
+
+    return ask_ai(command)
+
+def perform_command(command):
+    command = command.lower()
+    if "open notepad" in command:
+        os.system("notepad")
+        speak("Opening Notepad.")
+        append_chat("Jarvis", "Opening Notepad.", BOT_COLOR)
+    elif "open chrome" in command:
+        webbrowser.open("https://www.google.com")
+        speak("Opening Chrome.")
+        append_chat("Jarvis", "Opening Chrome.", BOT_COLOR)
+    elif "screenshot" in command:
+        pyautogui.screenshot("screenshot.png")
+        speak("Screenshot taken.")
+        append_chat("Jarvis", "Screenshot taken.", BOT_COLOR)
+    elif "shutdown" in command:
+        speak("Shutting down in 5 seconds.")
+        append_chat("Jarvis", "Shutting down in 5 seconds.", BOT_COLOR)
+        os.system("shutdown /s /t 5")
+    else:
+        return False
+    return True
+
+def ask_ai(prompt):
+    try:
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
+        data = response.json()
+        if "choices" in data and len(data["choices"]) > 0:
+            return data["choices"][0]["message"]["content"].strip()
+        else:
+            return "Sorry, I couldn't get an answer."
+    except Exception as e:
+        return f"AI Error: {e}"
+
+def get_weather(city=DEFAULT_CITY):
+    try:
+        session = requests.Session()
+        retries = Retry(total=3, backoff_factor=1, status_forcelist=[502, 503, 504])
+        session.mount("https://", HTTPAdapter(max_retries=retries))
+
+        url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={OPENWEATHER_API_KEY}&units=metric"
+        response = session.get(url, timeout=5)
+        data = response.json()
+        if data.get("cod") != 200:
+            return f"Sorry, I couldn't find weather info for {city}. ({data.get('message', '')})"
+        temp = data["main"]["temp"]
+        desc = data["weather"][0]["description"]
+        return f"The current temperature in {city} is {temp}°C with {desc}."
+    except requests.exceptions.Timeout:
+        return "Sorry, the request timed out while fetching weather."
+    except Exception as e:
+        return "Sorry, there was an error fetching the weather."
+
+# === Input Bindings & Button ===
+def on_enter_key(event=None):
+    text = input_var.get()
+    if text.strip():
+        process_user_text(text)
+    input_var.set("")
+
+def process_user_text(text):
+    global listening
+    if listening:
+        return
+    append_chat("You", text, USER_COLOR)
+    translated_text = translate_to_english(text)
+    response = process_command_and_respond(translated_text)
+    append_chat("Jarvis", response, BOT_COLOR)
+    speak(response)
+
+input_entry.bind("<Return>", on_enter_key)
+
+# === Launch ===
+append_chat("Jarvis", "Hello! Say 'Hey Jarvis' to start voice interaction or type your command below.", BOT_COLOR)
+status_var.set("Status: Waiting for wake word...")
+
+root.mainloop()
