@@ -15,8 +15,8 @@ import re
 from requests.adapters import HTTPAdapter, Retry
 
 # ==== YOUR API KEYS ====
-OPENROUTER_API_KEY = "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"
-OPENWEATHER_API_KEY = "98fcd8e78df48607c349e6568cd10946"
+OPENROUTER_API_KEY = "***"
+OPENWEATHER_API_KEY = "***"
 
 # === Configuration ===
 MODEL = "openai/gpt-4o-mini"
